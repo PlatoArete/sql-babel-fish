@@ -912,10 +912,10 @@ def unwrap_col_and_fn(expr: exp.Expression) -> Tuple[Optional[exp.Column], Optio
             return "EXTRACT", [unit]
         # Generic function case
         key_name = getattr(func, "key", None)
-        if key_name == "ANONYMOUS":
-            name = _id_to_str(getattr(func, "this", None)) or ""
+        if key_name == "ANONYMOUS" or not key_name:
+            name = _extract_func_name_sql(func)
         else:
-            name = key_name or _id_to_str(getattr(func, "this", None)) or ""
+            name = key_name or _id_to_str(getattr(func, "this", None)) or _extract_func_name_sql(func)
         if not name or name.upper() == "ANONYMOUS":
             arg_count = 0
             if getattr(func, "expressions", None):
@@ -1052,13 +1052,11 @@ def _render_expr(
     # Function call: render name(args...) with qualified columns
     if isinstance(node, exp.Func):
         key_name = getattr(node, "key", None)
-        if key_name == "ANONYMOUS":
-            name_expr = getattr(node, "this", None)
-            token = _render_sql(name_expr)
-            m = re.match(r"^[\"`]?([A-Za-z_][\w$]*)[\"`]?$", token or "")
-            raw_name = m.group(1) if m else (_id_to_str(name_expr) or "")
+        # Prefer parsing full function call to get name when anonymous
+        if key_name == "ANONYMOUS" or not key_name:
+            raw_name = _extract_func_name_sql(node)
         else:
-            raw_name = key_name or _id_to_str(getattr(node, "this", None)) or ""
+            raw_name = key_name or _id_to_str(getattr(node, "this", None)) or _extract_func_name_sql(node)
         name = _func_name_canon(raw_name)
         # Heuristic fallback for anonymous/unknown names (e.g., INDEX/OREPLACE)
         if not name or name.upper() == "ANONYMOUS":

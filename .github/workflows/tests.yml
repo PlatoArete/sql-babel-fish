@@ -25,7 +25,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Show Python environment
+        run: |
+          python --version
+          pip --version
+          python -c "import sys,platform;print('Platform:', platform.platform());print('Executable:', sys.executable)"
+          pip freeze
+
       - name: Run example tests
         run: |
-          python scripts/test_extractor_examples.py
-
+          python -u scripts/test_extractor_examples.py
