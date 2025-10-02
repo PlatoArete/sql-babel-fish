@@ -1,5 +1,7 @@
 # sql-babel-fish
 
+[![tests](https://github.com/PlatoArete/sql-babel-fish/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/PlatoArete/sql-babel-fish/actions/workflows/tests.yml)
+
 Extract minimal runtime dependencies from Teradata SQL using sqlglot. The tool reports base tables and the columns used from those tables ("variables"), plus temp tables, CTEs, functions, created objects, and warnings. Multi‑statement input is supported.
 
 Requirements
