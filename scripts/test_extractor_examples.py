@@ -222,6 +222,68 @@ def run_tests():
     assert "Operation 1.1" in pcm, f"pseudocode#15 missing Operation 1.1: {pcm}"
     print("Test 15 ran and completed successfully.")
 
+    # 16) Function on column: UPPER(col) = 'XYZ'
+    sql16 = "SELECT * FROM sales.order_items b WHERE UPPER(b.status) = 'SHIPPED';"
+    res16 = extract_teradata_dependencies(sql16)
+    # Pseudocode should render function with qualified column
+    pc16 = res16.get("_pseudocode", {}).get("Operation 1", [])[0]["where"]
+    assert "UPPER(sales.order_items.status) == 'SHIPPED'" in pc16, f"pseudocode#16 missing func render: {pc16}"
+    # Values should include fn marker
+    v16 = res16.get("_values", {}).get("sales.order_items", {}).get("status", [])
+    assert any(c.get("op") == "=" and c.get("value") == "SHIPPED" and c.get("fn") == "upper" for c in v16), f"values#16 missing fn upper: {v16}"
+    print("Test 16 ran and completed successfully.")
+
+    # 17) Function on RHS literal: UPPER('x') = b.status
+    sql17 = "SELECT * FROM sales.order_items b WHERE UPPER('shipped') = b.status;"
+    res17 = extract_teradata_dependencies(sql17)
+    pc17 = res17.get("_pseudocode", {}).get("Operation 1", [])[0]["where"]
+    assert "UPPER('shipped')" in pc17 and "sales.order_items.status" in pc17, f"pseudocode#17 missing rhs func: {pc17}"
+    v17 = res17.get("_values", {}).get("sales.order_items", {}).get("status", [])
+    assert any(c.get("op") == "=" and c.get("value") == "shipped" and c.get("value_fn") == "upper" for c in v17), f"values#17 missing value_fn: {v17}"
+    print("Test 17 ran and completed successfully.")
+
+    # 18) IN with function on literal side
+    sql18 = "SELECT * FROM sales.order_items b WHERE b.status IN (UPPER('a'), 'b');"
+    res18 = extract_teradata_dependencies(sql18)
+    pc18 = res18.get("_pseudocode", {}).get("Operation 1", [])[0]["where"]
+    assert "IN(UPPER('a'),'b')" in pc18.replace(" ", ""), f"pseudocode#18 missing IN with func: {pc18}"
+    v18 = res18.get("_values", {}).get("sales.order_items", {}).get("status", [])
+    in_conds = [c for c in v18 if c.get("op") == "in"]
+    assert in_conds, f"values#18 missing IN cond: {v18}"
+    cond18 = in_conds[0]
+    assert cond18.get("values") == ["a", "b"], f"values#18 wrong values: {cond18}"
+    assert cond18.get("value_fns") == ["upper", None], f"values#18 wrong value_fns: {cond18}"
+    print("Test 18 ran and completed successfully.")
+
+    # 19) LIKE with function on literal side
+    sql19 = "SELECT * FROM sales.order_items b WHERE b.status LIKE UPPER('%OK%');"
+    res19 = extract_teradata_dependencies(sql19)
+    pc19 = res19.get("_pseudocode", {}).get("Operation 1", [])[0]["where"]
+    assert "LIKEUPPER('%OK%')" in pc19.replace(" ", ""), f"pseudocode#19 missing LIKE func: {pc19}"
+    v19 = res19.get("_values", {}).get("sales.order_items", {}).get("status", [])
+    like_conds = [c for c in v19 if c.get("op") == "like"]
+    assert like_conds and like_conds[0].get("value") == "%OK%" and like_conds[0].get("value_fn") == "upper", f"values#19 missing like value_fn: {like_conds}"
+    print("Test 19 ran and completed successfully.")
+
+    # 20) Correlated subquery EXISTS: correct sub-numbering, qualified correlated ref, no duplicate op
+    sql20 = (
+        "SELECT o.order_id FROM sales.orders o WHERE EXISTS ("
+        "SELECT 1 FROM sales.order_items i JOIN sales.shipments s ON i.id = s.item_id "
+        "WHERE i.order_id = o.order_id)"
+    )
+    res20 = extract_teradata_dependencies(sql20)
+    pcm20 = res20.get("_pseudocode", {})
+    assert "Operation 1" in pcm20, f"pseudocode#20 missing Operation 1: {pcm20}"
+    assert "Operation 1.1" in pcm20, f"pseudocode#20 missing Operation 1.1: {pcm20}"
+    assert "Operation 2" not in pcm20, f"pseudocode#20 has unexpected Operation 2: {pcm20.keys()}"
+    op1 = pcm20["Operation 1"][0]
+    assert op1.get("where") == "EXISTS(Operation 1.1)", f"pseudocode#20 outer where not EXISTS(Operation 1.1): {op1.get('where')}"
+    op11 = pcm20["Operation 1.1"][0]
+    assert "sales.order_items.id == sales.shipments.item_id" in op11.get("join", ""), f"pseudocode#20 missing inner join: {op11.get('join')}"
+    assert "sales.order_items.order_id == sales.orders.order_id" in op11.get("where", ""), f"pseudocode#20 missing qualified correlated ref: {op11.get('where')}"
+    assert res20.get("_warnings", []) == [], f"pseudocode#20 unexpected warnings: {res20.get('_warnings')}"
+    print("Test 20 ran and completed successfully.")
+
     print("All example tests passed.")
 
 

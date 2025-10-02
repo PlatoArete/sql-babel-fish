@@ -283,6 +283,23 @@ def _build_alias_map_for_select(sel: exp.Select) -> Tuple[Dict[str, str], Dict[s
     return alias_map, alias_cols, alias_single_base
 
 
+def _collect_outer_alias_map(sel: exp.Select) -> Dict[str, str]:
+    """Collect alias->base table mappings from ancestor SELECT scopes.
+
+    Keys are normalized (lowercased) to match local alias_map behavior.
+    """
+    outer: Dict[str, str] = {}
+    p = getattr(sel, "parent", None)
+    while p is not None:
+        if isinstance(p, exp.Select):
+            parent_alias_map, _, _ = _build_alias_map_for_select(p)
+            for k, v in parent_alias_map.items():
+                if k not in outer:
+                    outer[k] = v
+        p = getattr(p, "parent", None)
+    return outer
+
+
 def _record_star_variables(sel: exp.Select, alias_map: Dict[str, str], alias_single_base: Dict[str, str], variables: Dict[str, Set[str]], warnings: List[str]):
     # Handle top-level SELECT star(s)
     for node in sel.find_all(exp.Star):
@@ -459,48 +476,81 @@ def _collect_values_for_select(
     # Equality comparisons
     for cmp_ in sel.find_all(exp.EQ):
         left, right = cmp_.left, cmp_.right
-        if isinstance(left, exp.Column):
-            col_name = _id_to_str(left.this)
-            qualifier = _id_to_str(left.args.get("table"))
-            vlist = _literal_values(right)
+        left_col, left_fn = unwrap_col_and_fn(left)
+        right_col, right_fn = unwrap_col_and_fn(right)
+        if left_col is not None:
+            col_name = _id_to_str(left_col.this)
+            qualifier = _id_to_str(left_col.args.get("table"))
+            vlist, vfn = unwrap_value_and_fn(right)
             if qualifier and vlist:
                 base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                 if base:
                     for v in vlist:
-                        add_cond(base, col_name, {"op": "=", "value": v})
-        elif isinstance(right, exp.Column):
-            col_name = _id_to_str(right.this)
-            qualifier = _id_to_str(right.args.get("table"))
-            vlist = _literal_values(left)
+                        cond = {"op": "=", "value": v}
+                        if left_fn:
+                            cond["fn"] = left_fn
+                        if vfn:
+                            cond["value_fn"] = vfn
+                        add_cond(base, col_name, cond)
+        elif right_col is not None:
+            col_name = _id_to_str(right_col.this)
+            qualifier = _id_to_str(right_col.args.get("table"))
+            vlist, vfn = unwrap_value_and_fn(left)
             if qualifier and vlist:
                 base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                 if base:
                     for v in vlist:
-                        add_cond(base, col_name, {"op": "=", "value": v})
+                        cond = {"op": "=", "value": v}
+                        if right_fn:
+                            cond["fn"] = right_fn
+                        if vfn:
+                            cond["value_fn"] = vfn
+                        add_cond(base, col_name, cond)
 
     # IN lists
     for inn in sel.find_all(exp.In):
         this_expr = inn.this
-        if isinstance(this_expr, exp.Column):
-            col_name = _id_to_str(this_expr.this)
-            qualifier = _id_to_str(this_expr.args.get("table"))
-            vlist = _literal_values(inn.expressions)
-            if qualifier and vlist:
+        col_node, fn_name = unwrap_col_and_fn(this_expr)
+        if col_node is not None:
+            col_name = _id_to_str(col_node.this)
+            qualifier = _id_to_str(col_node.args.get("table"))
+            # Unwrap values; support tuples with mixed functions
+            values_list: List[Any] = []
+            value_fns: List[Optional[str]] = []
+            seq = (inn.expressions.expressions if isinstance(inn.expressions, exp.Tuple) else inn.expressions or [])
+            for e in seq:
+                vals, vfn = unwrap_value_and_fn(e)
+                if vals:
+                    # Use first literal if multiple (rare in nested functions)
+                    values_list.append(vals[0])
+                    value_fns.append(vfn)
+            if qualifier and values_list:
                 base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                 if base:
-                    add_cond(base, col_name, {"op": "in", "values": vlist})
+                    cond = {"op": "in", "values": values_list}
+                    if any(vfn is not None for vfn in value_fns):
+                        cond["value_fns"] = [vf if vf is not None else None for vf in value_fns]
+                    if fn_name:
+                        cond["fn"] = fn_name
+                    add_cond(base, col_name, cond)
 
     # LIKE pattern
     for like in sel.find_all(exp.Like):
         this_expr = like.this
-        if isinstance(this_expr, exp.Column):
-            col_name = _id_to_str(this_expr.this)
-            qualifier = _id_to_str(this_expr.args.get("table"))
-            vlist = _literal_values(like.expression)
-            if qualifier and vlist:
+        col_node, fn_name = unwrap_col_and_fn(this_expr)
+        if col_node is not None:
+            col_name = _id_to_str(col_node.this)
+            qualifier = _id_to_str(col_node.args.get("table"))
+            vals, vfn = unwrap_value_and_fn(like.expression)
+            if qualifier and vals:
                 base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                 if base:
-                    add_cond(base, col_name, {"op": "like", "value": vlist[0]})
+                    cond = {"op": "like", "value": vals[0]}
+                    if fn_name:
+                        cond["fn"] = fn_name
+                    if vfn:
+                        cond["value_fn"] = vfn
+                    add_cond(base, col_name, cond)
 
     # Ranges: >, >=, <, <=
     op_map = {
@@ -515,24 +565,32 @@ def _collect_values_for_select(
             continue
         for node in sel.find_all(cls):
             left, right = node.left, node.right
-            if isinstance(left, exp.Column):
-                col_name = _id_to_str(left.this)
-                qualifier = _id_to_str(left.args.get("table"))
+            left_col, left_fn = unwrap_col_and_fn(left)
+            right_col, right_fn = unwrap_col_and_fn(right)
+            if left_col is not None:
+                col_name = _id_to_str(left_col.this)
+                qualifier = _id_to_str(left_col.args.get("table"))
                 vlist = _literal_values(right)
                 if qualifier and vlist:
                     base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                     if base:
-                        add_cond(base, col_name, {"op": op_str, "value": vlist[0]})
-            elif isinstance(right, exp.Column):
+                        cond = {"op": op_str, "value": vlist[0]}
+                        if left_fn:
+                            cond["fn"] = left_fn
+                        add_cond(base, col_name, cond)
+            elif right_col is not None:
                 # Flip operator direction
                 flip = {">": "<", ">=": "<=", "<": ">", "<=": ">="}
-                col_name = _id_to_str(right.this)
-                qualifier = _id_to_str(right.args.get("table"))
+                col_name = _id_to_str(right_col.this)
+                qualifier = _id_to_str(right_col.args.get("table"))
                 vlist = _literal_values(left)
                 if qualifier and vlist:
                     base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                     if base:
-                        add_cond(base, col_name, {"op": flip[op_str], "value": vlist[0]})
+                        cond = {"op": flip[op_str], "value": vlist[0]}
+                        if right_fn:
+                            cond["fn"] = right_fn
+                        add_cond(base, col_name, cond)
 
     # BETWEEN
     Between = getattr(exp, "Between", None)
@@ -541,9 +599,10 @@ def _collect_values_for_select(
             this_expr = node.this
             low_expr = node.args.get("low")
             high_expr = node.args.get("high")
-            if isinstance(this_expr, exp.Column):
-                col_name = _id_to_str(this_expr.this)
-                qualifier = _id_to_str(this_expr.args.get("table"))
+            col_node, fn_name = unwrap_col_and_fn(this_expr)
+            if isinstance(col_node, exp.Column):
+                col_name = _id_to_str(col_node.this)
+                qualifier = _id_to_str(col_node.args.get("table"))
                 lows = _literal_values(low_expr)
                 highs = _literal_values(high_expr)
                 # Fallback to rendered SQL if not recognized as literal nodes
@@ -554,7 +613,10 @@ def _collect_values_for_select(
                 if qualifier and lows and highs:
                     base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                     if base:
-                        add_cond(base, col_name, {"op": "between", "low": lows[0], "high": highs[0]})
+                        cond = {"op": "between", "low": lows[0], "high": highs[0]}
+                        if fn_name:
+                            cond["fn"] = fn_name
+                        add_cond(base, col_name, cond)
 
 
 def _qualify_column(
@@ -603,6 +665,92 @@ def _render_value(node: exp.Expression) -> Optional[str]:
     return _render_sql(node)
 
 
+def unwrap_col_and_fn(expr: exp.Expression) -> Tuple[Optional[exp.Column], Optional[str]]:
+    """Return (Column, function_name) if expr is a Column or a function wrapping a Column.
+
+    - If expr is Column -> (Column, None)
+    - If expr is Func and has a Column arg -> (Column, func_name_lower)
+    - Else -> (None, None)
+    """
+    if isinstance(expr, exp.Column):
+        return expr, None
+    if isinstance(expr, exp.Func):
+        # Prefer explicit expressions list
+        if expr.expressions:
+            for e in expr.expressions:
+                if isinstance(e, exp.Column):
+                    fn_name = getattr(expr, "key", None) or _id_to_str(getattr(expr, "this", None)) or None
+                    return e, (fn_name.lower() if fn_name else None)
+        # Some Func subclasses (e.g., UPPER) use `this` as the argument expression
+        inner = expr.args.get("this")
+        if isinstance(inner, exp.Column):
+            fn_name = getattr(expr, "key", None) or _id_to_str(getattr(expr, "this", None)) or None
+            return inner, (fn_name.lower() if fn_name else None)
+    return None, None
+
+
+def unwrap_value_and_fn(expr: exp.Expression) -> Tuple[List[Any], Optional[str]]:
+    """Extract literal value(s) and a function name if the expression is a function applied to literal(s).
+
+    Returns (values, fn_name_or_None).
+    """
+    # Direct literals or tuples
+    vals = _literal_values(expr)
+    if vals:
+        return vals, None
+    # Function wrapping literal(s)
+    if isinstance(expr, exp.Func):
+        fn_name = getattr(expr, "key", None) or _id_to_str(getattr(expr, "this", None)) or None
+        # Resolve arg nodes
+        arg_nodes: List[exp.Expression] = []
+        if expr.expressions:
+            arg_nodes.extend(expr.expressions)
+        else:
+            maybe_arg = expr.args.get("this")
+            if isinstance(maybe_arg, exp.Expression) and not isinstance(maybe_arg, exp.Identifier):
+                arg_nodes.append(maybe_arg)
+        vals_acc: List[Any] = []
+        for a in arg_nodes:
+            vals_acc.extend(_literal_values(a))
+        if vals_acc:
+            return vals_acc, (fn_name.lower() if fn_name else None)
+    return [], None
+
+
+def _render_expr(
+    node: exp.Expression,
+    alias_map: Dict[str, str],
+    alias_cols: Dict[str, Dict[str, str]],
+    alias_single_base: Dict[str, str],
+    select_label_map: Optional[Dict[exp.Select, str]] = None,
+) -> Optional[str]:
+    if isinstance(node, exp.Column):
+        return _qualify_column(node, alias_map, alias_cols, alias_single_base)
+    if isinstance(node, exp.Literal):
+        return _render_value(node)
+    # Function call: render name(args...) with qualified columns
+    if isinstance(node, exp.Func):
+        name = getattr(node, "key", None) or _id_to_str(getattr(node, "this", None)) or ""
+        # Collect arguments from either .expressions (list) or the unary arg in .args['this']
+        arg_nodes: List[exp.Expression] = []
+        if node.expressions:
+            arg_nodes.extend(node.expressions)
+        else:
+            maybe_arg = node.args.get("this")
+            if isinstance(maybe_arg, exp.Expression) and not isinstance(maybe_arg, exp.Identifier):
+                arg_nodes.append(maybe_arg)
+        args = []
+        for e in arg_nodes:
+            r = _render_expr(e, alias_map, alias_cols, alias_single_base, select_label_map)
+            args.append(r if r is not None else _render_sql(e))
+        return f"{name.upper()}({', '.join(args)})"
+    # Nested conditions
+    cond = _render_condition(node, alias_map, alias_cols, alias_single_base, select_label_map)
+    if cond is not None:
+        return cond
+    return _render_sql(node)
+
+
 def _render_condition(
     node: exp.Expression,
     alias_map: Dict[str, str],
@@ -644,14 +792,8 @@ def _render_condition(
             left, right = node.left, node.right
             left_str = None
             right_str = None
-            if isinstance(left, exp.Column):
-                left_str = _qualify_column(left, alias_map, alias_cols, alias_single_base)
-            else:
-                left_str = _render_value(left)
-            if isinstance(right, exp.Column):
-                right_str = _qualify_column(right, alias_map, alias_cols, alias_single_base)
-            else:
-                right_str = _render_value(right)
+            left_str = _render_expr(left, alias_map, alias_cols, alias_single_base, select_label_map)
+            right_str = _render_expr(right, alias_map, alias_cols, alias_single_base, select_label_map)
             if left_str and right_str:
                 return f"({left_str} {sym} {right_str})"
 
@@ -662,8 +804,9 @@ def _render_condition(
             col = _qualify_column(this_expr, alias_map, alias_cols, alias_single_base)
             if col:
                 vals = []
-                for e in (node.expressions.expressions if isinstance(node.expressions, exp.Tuple) else node.expressions or []):
-                    v = _render_value(e)
+                seq = (node.expressions.expressions if isinstance(node.expressions, exp.Tuple) else node.expressions or [])
+                for e in seq:
+                    v = _render_expr(e, alias_map, alias_cols, alias_single_base, select_label_map)
                     if v is not None:
                         vals.append(v)
                 return f"({col} IN ({', '.join(vals)}))" if vals else None
@@ -685,7 +828,7 @@ def _render_condition(
         this_expr = node.this
         if isinstance(this_expr, exp.Column):
             col = _qualify_column(this_expr, alias_map, alias_cols, alias_single_base)
-            val = _render_value(node.expression)
+            val = _render_expr(node.expression, alias_map, alias_cols, alias_single_base, select_label_map)
             if col and val is not None:
                 return f"({col} LIKE {val})"
     NotLike = getattr(exp, "NotLike", None)
@@ -693,7 +836,7 @@ def _render_condition(
         this_expr = node.this
         if isinstance(this_expr, exp.Column):
             col = _qualify_column(this_expr, alias_map, alias_cols, alias_single_base)
-            val = _render_value(node.expression)
+            val = _render_expr(node.expression, alias_map, alias_cols, alias_single_base, select_label_map)
             if col and val is not None:
                 return f"({col} NOT LIKE {val})"
 
@@ -760,7 +903,21 @@ def _collect_join_pseudocode_for_select(
     alias_single_base: Dict[str, str],
 ) -> Optional[str]:
     join_conds: List[str] = []
+    from_ = sel.args.get("from")
+    if not from_:
+        return None
+    # Scan all Join nodes under this SELECT, but only those whose nearest Select ancestor is this sel
     for j in sel.find_all(exp.Join):
+        # Ascend to nearest Select ancestor
+        p = getattr(j, "parent", None)
+        nearest_sel = None
+        while p is not None:
+            if isinstance(p, exp.Select):
+                nearest_sel = p
+                break
+            p = getattr(p, "parent", None)
+        if nearest_sel is not sel:
+            continue
         # Prefer building from explicit equality nodes to avoid odd wrapper renders
         eqs: List[str] = []
         for eq_node in j.find_all(getattr(exp, "EQ", None)):
@@ -850,18 +1007,25 @@ def extract_teradata_dependencies(sql: str) -> Dict[str, object]:
 
     select_label_map: Dict[exp.Select, str] = {}
 
-    def _process_select_for_pseudocode(sel: exp.Select, label: str):
-        # Assign label for this select early
-        select_label_map[sel] = label
-        # Recursively process direct child SELECTs first, so labels are available for EXISTS rendering
-        idx = 1
+    def _direct_child_selects(sel: exp.Select) -> List[exp.Select]:
+        children: List[exp.Select] = []
         for child in sel.find_all(exp.Select):
             if _is_direct_child_select(child, sel):
-                _process_select_for_pseudocode(child, f"{label}.{idx}")
-                idx += 1
+                children.append(child)
+        return children
 
-        # Now render this select's components with label map available
-        alias_map, alias_cols, alias_single_base = _build_alias_map_for_select(sel)
+    def _assign_labels(sel: exp.Select, label: str):
+        select_label_map[sel] = label
+        idx = 1
+        for child in _direct_child_selects(sel):
+            _assign_labels(child, f"{label}.{idx}")
+            idx += 1
+
+    def _render_select_and_children(sel: exp.Select, label: str):
+        alias_map_local, alias_cols, alias_single_base = _build_alias_map_for_select(sel)
+        outer_alias_map = _collect_outer_alias_map(sel)
+        alias_map = dict(outer_alias_map)
+        alias_map.update(alias_map_local)
         where_node = sel.args.get("where")
         where_pc = _render_condition(where_node.this, alias_map, alias_cols, alias_single_base, select_label_map) if where_node is not None else ""
         having_node = sel.args.get("having")
@@ -873,6 +1037,11 @@ def extract_teradata_dependencies(sql: str) -> Dict[str, object]:
             "where": where_pc,
             "having": having_pc,
         }]
+        # Then render children in order
+        idx = 1
+        for child in _direct_child_selects(sel):
+            _render_select_and_children(child, f"{label}.{idx}")
+            idx += 1
 
     top_index = 1
     for stmt in statements:
@@ -911,19 +1080,16 @@ def extract_teradata_dependencies(sql: str) -> Dict[str, object]:
 
         # Variables: per SELECT scope
         for sel in qualified_stmt.find_all(exp.Select):
-            alias_map, alias_cols, alias_single_base = _build_alias_map_for_select(sel)
+            alias_map_local, alias_cols, alias_single_base = _build_alias_map_for_select(sel)
+            outer_alias_map = _collect_outer_alias_map(sel)
+            alias_map = dict(outer_alias_map)
+            alias_map.update(alias_map_local)
             _collect_variables_for_select(sel, alias_map, alias_cols, alias_single_base, variables, warnings)
             _collect_values_for_select(sel, alias_map, alias_cols, alias_single_base, values)
-            # Only label top-level SELECTs (not nested in any Subquery) with a base index
-            p = getattr(sel, "parent", None)
-            nested_in_subq = False
-            while p is not None and p is not qualified_stmt:
-                if isinstance(p, exp.Subquery):
-                    nested_in_subq = True
-                    break
-                p = getattr(p, "parent", None)
-            if not nested_in_subq:
-                _process_select_for_pseudocode(sel, str(top_index))
+            # Only label the top-level SELECT (the statement root) with a base index
+            if sel is qualified_stmt:
+                _assign_labels(sel, str(top_index))
+                _render_select_and_children(sel, str(top_index))
                 top_index += 1
 
         # Functions
