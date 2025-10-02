@@ -516,12 +516,12 @@ def _collect_values_for_select(
     # Equality comparisons
     for cmp_ in sel.find_all(exp.EQ):
         left, right = cmp_.left, cmp_.right
-        left_col, left_fn, left_fn_args = unwrap_col_and_fn(left)
-        right_col, right_fn, right_fn_args = unwrap_col_and_fn(right)
+        left_col, left_fn, left_fn_args, left_fn_stack = unwrap_col_and_fn(left)
+        right_col, right_fn, right_fn_args, right_fn_stack = unwrap_col_and_fn(right)
         if left_col is not None:
             col_name = _id_to_str(left_col.this)
             qualifier = _id_to_str(left_col.args.get("table"))
-            vlist, vfn, vfn_args = unwrap_value_and_fn(right)
+            vlist, vfn, vfn_args, vfn_stack = unwrap_value_and_fn(right)
             if qualifier and vlist:
                 base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                 if base:
@@ -535,11 +535,15 @@ def _collect_values_for_select(
                             cond["value_fn"] = _func_name_canon(vfn)
                         if vfn_args:
                             cond["value_fn_args"] = vfn_args
+                        if vfn_stack:
+                            cond["value_fn_stack"] = vfn_stack
+                        if left_fn_stack:
+                            cond["fn_stack"] = left_fn_stack
                         add_cond(base, col_name, cond)
         elif right_col is not None:
             col_name = _id_to_str(right_col.this)
             qualifier = _id_to_str(right_col.args.get("table"))
-            vlist, vfn, vfn_args = unwrap_value_and_fn(left)
+            vlist, vfn, vfn_args, vfn_stack = unwrap_value_and_fn(left)
             if qualifier and vlist:
                 base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                 if base:
@@ -553,6 +557,10 @@ def _collect_values_for_select(
                             cond["value_fn"] = _func_name_canon(vfn)
                         if vfn_args:
                             cond["value_fn_args"] = vfn_args
+                        if vfn_stack:
+                            cond["value_fn_stack"] = vfn_stack
+                        if right_fn_stack:
+                            cond["fn_stack"] = right_fn_stack
                         add_cond(base, col_name, cond)
 
     # IN lists
@@ -561,7 +569,7 @@ def _collect_values_for_select(
         if _has_ancestor(inn, exp.Not):
             continue
         this_expr = inn.this
-        col_node, fn_name, fn_args = unwrap_col_and_fn(this_expr)
+        col_node, fn_name, fn_args, fn_stack = unwrap_col_and_fn(this_expr)
         if col_node is not None:
             col_name = _id_to_str(col_node.this)
             qualifier = _id_to_str(col_node.args.get("table"))
@@ -571,11 +579,15 @@ def _collect_values_for_select(
             value_fn_args_list: List[Optional[List[Any]]] = []
             seq = (inn.expressions.expressions if isinstance(inn.expressions, exp.Tuple) else inn.expressions or [])
             for e in seq:
-                vals, vfn, vfn_args = unwrap_value_and_fn(e)
+                vals, vfn, vfn_args, vfn_stack = unwrap_value_and_fn(e)
                 if vals:
                     # Use first literal if multiple (rare in nested functions)
                     values_list.append(vals[0])
                     value_fns.append(vfn)
+                    # capture stacks per element
+                    # initialize list only if any present
+                    locals().setdefault('value_fn_stacks', [])
+                    locals()['value_fn_stacks'].append(vfn_stack)
                     value_fn_args_list.append(vfn_args)
             if qualifier and values_list:
                 base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
@@ -589,6 +601,10 @@ def _collect_values_for_select(
                         cond["fn_args"] = fn_args
                     if any(vfa is not None for vfa in value_fn_args_list):
                         cond["value_fn_args_list"] = [vfa if vfa is not None else None for vfa in value_fn_args_list]
+                    if 'value_fn_stacks' in locals() and any(vs for vs in locals()['value_fn_stacks']):
+                        cond["value_fn_stack_list"] = locals()['value_fn_stacks']
+                    if fn_stack:
+                        cond["fn_stack"] = fn_stack
                     add_cond(base, col_name, cond)
 
     # LIKE pattern
@@ -597,11 +613,11 @@ def _collect_values_for_select(
         if _has_ancestor(like, getattr(exp, "Not", exp.Not)):
             continue
         this_expr = like.this
-        col_node, fn_name, fn_args = unwrap_col_and_fn(this_expr)
+        col_node, fn_name, fn_args, fn_stack = unwrap_col_and_fn(this_expr)
         if col_node is not None:
             col_name = _id_to_str(col_node.this)
             qualifier = _id_to_str(col_node.args.get("table"))
-            vals, vfn, vfn_args = unwrap_value_and_fn(like.expression)
+            vals, vfn, vfn_args, vfn_stack = unwrap_value_and_fn(like.expression)
             if qualifier and vals:
                 base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                 if base:
@@ -614,6 +630,10 @@ def _collect_values_for_select(
                         cond["value_fn"] = _func_name_canon(vfn)
                     if vfn_args:
                         cond["value_fn_args"] = vfn_args
+                    if vfn_stack:
+                        cond["value_fn_stack"] = vfn_stack
+                    if fn_stack:
+                        cond["fn_stack"] = fn_stack
                     add_cond(base, col_name, cond)
 
     # NOT LIKE
@@ -621,11 +641,11 @@ def _collect_values_for_select(
     if NotLike is not None:
         for nlike in sel.find_all(NotLike):
             this_expr = nlike.this
-            col_node, fn_name, fn_args = unwrap_col_and_fn(this_expr)
+            col_node, fn_name, fn_args, fn_stack = unwrap_col_and_fn(this_expr)
             if col_node is not None:
                 col_name = _id_to_str(col_node.this)
                 qualifier = _id_to_str(col_node.args.get("table"))
-                vals, vfn, vfn_args = unwrap_value_and_fn(nlike.expression)
+                vals, vfn, vfn_args, vfn_stack = unwrap_value_and_fn(nlike.expression)
                 if qualifier and vals:
                     base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                     if base:
@@ -638,6 +658,10 @@ def _collect_values_for_select(
                             cond["value_fn"] = _func_name_canon(vfn)
                         if vfn_args:
                             cond["value_fn_args"] = vfn_args
+                        if vfn_stack:
+                            cond["value_fn_stack"] = vfn_stack
+                        if fn_stack:
+                            cond["fn_stack"] = fn_stack
                         add_cond(base, col_name, cond)
 
     # NOT IN
@@ -645,7 +669,7 @@ def _collect_values_for_select(
     if NotIn is not None:
         for nin in sel.find_all(NotIn):
             this_expr = nin.this
-            col_node, fn_name, fn_args = unwrap_col_and_fn(this_expr)
+            col_node, fn_name, fn_args, fn_stack = unwrap_col_and_fn(this_expr)
             if col_node is not None:
                 col_name = _id_to_str(col_node.this)
                 qualifier = _id_to_str(col_node.args.get("table"))
@@ -654,11 +678,13 @@ def _collect_values_for_select(
                 value_fn_args_list: List[Optional[List[Any]]] = []
                 seq = (nin.expressions.expressions if isinstance(nin.expressions, exp.Tuple) else nin.expressions or [])
                 for e in seq:
-                    vals, vfn, vfn_args = unwrap_value_and_fn(e)
+                    vals, vfn, vfn_args, vfn_stack = unwrap_value_and_fn(e)
                     if vals:
                         values_list.append(vals[0])
                         value_fns.append(vfn)
                         value_fn_args_list.append(vfn_args)
+                        locals().setdefault('value_fn_stacks', [])
+                        locals()['value_fn_stacks'].append(vfn_stack)
                 if qualifier and values_list:
                     base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                     if base:
@@ -671,6 +697,10 @@ def _collect_values_for_select(
                             cond["fn_args"] = fn_args
                         if any(vfa is not None for vfa in value_fn_args_list):
                             cond["value_fn_args_list"] = [vfa if vfa is not None else None for vfa in value_fn_args_list]
+                        if 'value_fn_stacks' in locals() and any(vs for vs in locals()['value_fn_stacks']):
+                            cond["value_fn_stack_list"] = locals()['value_fn_stacks']
+                        if fn_stack:
+                            cond["fn_stack"] = fn_stack
                         add_cond(base, col_name, cond)
 
     # Also handle NOT(In(...)) and NOT(Like(...)) patterns represented as NOT nodes
@@ -678,7 +708,7 @@ def _collect_values_for_select(
         inner = not_node.this
         if isinstance(inner, exp.In):
             this_expr = inner.this
-            col_node, fn_name, fn_args = unwrap_col_and_fn(this_expr)
+            col_node, fn_name, fn_args, fn_stack = unwrap_col_and_fn(this_expr)
             if col_node is not None:
                 col_name = _id_to_str(col_node.this)
                 qualifier = _id_to_str(col_node.args.get("table"))
@@ -687,11 +717,13 @@ def _collect_values_for_select(
                 value_fn_args_list: List[Optional[List[Any]]] = []
                 seq = (inner.expressions.expressions if isinstance(inner.expressions, exp.Tuple) else inner.expressions or [])
                 for e in seq:
-                    vals, vfn, vfn_args = unwrap_value_and_fn(e)
+                    vals, vfn, vfn_args, vfn_stack = unwrap_value_and_fn(e)
                     if vals:
                         values_list.append(vals[0])
                         value_fns.append(vfn)
                         value_fn_args_list.append(vfn_args)
+                        locals().setdefault('value_fn_stacks', [])
+                        locals()['value_fn_stacks'].append(vfn_stack)
                 if qualifier and values_list:
                     base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                     if base:
@@ -704,15 +736,19 @@ def _collect_values_for_select(
                             cond["fn_args"] = fn_args
                         if any(vfa is not None for vfa in value_fn_args_list):
                             cond["value_fn_args_list"] = [vfa if vfa is not None else None for vfa in value_fn_args_list]
+                        if 'value_fn_stacks' in locals() and any(vs for vs in locals()['value_fn_stacks']):
+                            cond["value_fn_stack_list"] = locals()['value_fn_stacks']
+                        if fn_stack:
+                            cond["fn_stack"] = fn_stack
                         add_cond(base, col_name, cond)
         LikeClass = getattr(exp, "Like", None)
         if LikeClass is not None and isinstance(inner, LikeClass):
             this_expr = inner.this
-            col_node, fn_name, fn_args = unwrap_col_and_fn(this_expr)
+            col_node, fn_name, fn_args, fn_stack = unwrap_col_and_fn(this_expr)
             if col_node is not None:
                 col_name = _id_to_str(col_node.this)
                 qualifier = _id_to_str(col_node.args.get("table"))
-                vals, vfn, vfn_args = unwrap_value_and_fn(inner.expression)
+                vals, vfn, vfn_args, vfn_stack = unwrap_value_and_fn(inner.expression)
                 if qualifier and vals:
                     base = _target_table_for_qualifier(qualifier, alias_map, alias_cols, alias_single_base, col_name)
                     if base:
@@ -725,6 +761,10 @@ def _collect_values_for_select(
                             cond["value_fn"] = _func_name_canon(vfn)
                         if vfn_args:
                             cond["value_fn_args"] = vfn_args
+                        if vfn_stack:
+                            cond["value_fn_stack"] = vfn_stack
+                        if fn_stack:
+                            cond["fn_stack"] = fn_stack
                         add_cond(base, col_name, cond)
 
     # Ranges: >, >=, <, <=
@@ -740,8 +780,8 @@ def _collect_values_for_select(
             continue
         for node in sel.find_all(cls):
             left, right = node.left, node.right
-            left_col, left_fn, left_fn_args = unwrap_col_and_fn(left)
-            right_col, right_fn, right_fn_args = unwrap_col_and_fn(right)
+            left_col, left_fn, left_fn_args, left_fn_stack = unwrap_col_and_fn(left)
+            right_col, right_fn, right_fn_args, right_fn_stack = unwrap_col_and_fn(right)
             if left_col is not None:
                 col_name = _id_to_str(left_col.this)
                 qualifier = _id_to_str(left_col.args.get("table"))
@@ -754,6 +794,8 @@ def _collect_values_for_select(
                             cond["fn"] = left_fn
                         if left_fn_args:
                             cond["fn_args"] = left_fn_args
+                        if left_fn_stack:
+                            cond["fn_stack"] = left_fn_stack
                         add_cond(base, col_name, cond)
             elif right_col is not None:
                 # Flip operator direction
@@ -769,6 +811,8 @@ def _collect_values_for_select(
                             cond["fn"] = right_fn
                         if right_fn_args:
                             cond["fn_args"] = right_fn_args
+                        if right_fn_stack:
+                            cond["fn_stack"] = right_fn_stack
                         add_cond(base, col_name, cond)
 
     # BETWEEN
@@ -778,7 +822,7 @@ def _collect_values_for_select(
             this_expr = node.this
             low_expr = node.args.get("low")
             high_expr = node.args.get("high")
-            col_node, fn_name, fn_args = unwrap_col_and_fn(this_expr)
+            col_node, fn_name, fn_args, fn_stack = unwrap_col_and_fn(this_expr)
             if isinstance(col_node, exp.Column):
                 col_name = _id_to_str(col_node.this)
                 qualifier = _id_to_str(col_node.args.get("table"))
@@ -797,6 +841,8 @@ def _collect_values_for_select(
                             cond["fn"] = fn_name
                         if fn_args:
                             cond["fn_args"] = fn_args
+                        if fn_stack:
+                            cond["fn_stack"] = fn_stack
                         add_cond(base, col_name, cond)
 
 
@@ -846,125 +892,150 @@ def _render_value(node: exp.Expression) -> Optional[str]:
     return _render_sql(node)
 
 
-def unwrap_col_and_fn(expr: exp.Expression) -> Tuple[Optional[exp.Column], Optional[str], Optional[List[Any]]]:
-    """Return (Column, function_name, fn_args) for column-side expressions.
+def unwrap_col_and_fn(expr: exp.Expression) -> Tuple[Optional[exp.Column], Optional[str], Optional[List[Any]], Optional[List[Dict[str, Any]]]]:
+    """Return (Column, top_fn_name, top_fn_args, fn_stack) for column-side expressions.
 
-    - If expr is Column -> (Column, None, None)
-    - If expr is Func and has a Column arg -> (Column, func_name_lower, fn_args)
-      fn_args includes non-column literal/rendered args (e.g., SUBSTR(col, 1, 3) -> [1, 3])
-    - Else -> (None, None, None)
+    fn_stack is list of {fn, args} from outermost to innermost wrappers around the column.
     """
     if isinstance(expr, exp.Column):
-        return expr, None, None
-    if isinstance(expr, exp.Func):
-        # Collect arguments from either .expressions or unary .args['this']
+        return expr, None, None, None
+
+    stack: List[Dict[str, Any]] = []
+    current: exp.Expression = expr
+    target_col: Optional[exp.Column] = None
+
+    def func_name_and_args_any(func: exp.Expression) -> Tuple[str, List[Any]]:
+        # Support Func and Extract
+        Extract = getattr(exp, "Extract", None)
+        if Extract is not None and isinstance(func, Extract):
+            unit = _id_to_str(getattr(func, "this", None)).upper()
+            return "EXTRACT", [unit]
+        # Generic function case
+        key_name = getattr(func, "key", None)
+        if key_name == "ANONYMOUS":
+            name = _id_to_str(getattr(func, "this", None)) or ""
+        else:
+            name = key_name or _id_to_str(getattr(func, "this", None)) or ""
+        if not name or name.upper() == "ANONYMOUS":
+            arg_count = 0
+            if getattr(func, "expressions", None):
+                arg_count += sum(1 for e in func.expressions if isinstance(e, exp.Expression) and not isinstance(e, exp.Identifier))
+            for v in getattr(func, "args", {}).values():
+                if isinstance(v, exp.Expression) and not isinstance(v, exp.Identifier):
+                    arg_count += 1
+            if arg_count == 2:
+                name = "INDEX"
+            elif arg_count == 3:
+                name = "OREPLACE"
+        # collect non-column args
         arg_nodes: List[exp.Expression] = []
-        # Include positional expressions first if available
-        if getattr(expr, "expressions", None):
-            for e in expr.expressions:
+        if getattr(func, "expressions", None):
+            for e in func.expressions:
                 if isinstance(e, exp.Expression) and not isinstance(e, exp.Identifier):
                     arg_nodes.append(e)
-        # Gather named args in a stable, meaningful order
-        preferred = [
-            "this",
-            "expression",
-            "from",
-            "start",
-            "position",
-            "length",
-            "to",
-            "characters",
-            "pattern",
-            "replacement",
-            "value",
-            "sep",
-            "unit",
-        ]
-        for k in preferred:
-            v = expr.args.get(k)
+        for v in getattr(func, "args", {}).values():
             if isinstance(v, exp.Expression) and not isinstance(v, exp.Identifier) and v not in arg_nodes:
                 arg_nodes.append(v)
-        # Append any remaining args not in preferred
-        for k, v in expr.args.items():
-            if k in preferred:
-                continue
-            if isinstance(v, exp.Expression) and not isinstance(v, exp.Identifier) and v not in arg_nodes:
-                arg_nodes.append(v)
-        # Find the first Column argument and collect other args as fn_args
-        target_col: Optional[exp.Column] = None
-        fn_args: List[Any] = []
+        args: List[Any] = []
         for a in arg_nodes:
-            if isinstance(a, exp.Column) and target_col is None:
-                target_col = a
-            else:
-                lits = _literal_values(a)
-                if lits:
-                    fn_args.append(lits[0])
-                else:
-                    fn_args.append(_render_sql(a))
-        if target_col is not None:
-            key_name = getattr(expr, "key", None)
-            if key_name == "ANONYMOUS":
-                fn_key = _id_to_str(getattr(expr, "this", None)) or ""
-            else:
-                fn_key = key_name or _id_to_str(getattr(expr, "this", None)) or ""
-            if not fn_key or fn_key.upper() == "ANONYMOUS":
-                arg_count = 0
-                if getattr(expr, "expressions", None):
-                    arg_count += sum(1 for e in expr.expressions if isinstance(e, exp.Expression) and not isinstance(e, exp.Identifier))
-                for v in expr.args.values():
-                    if isinstance(v, exp.Expression) and not isinstance(v, exp.Identifier):
-                        arg_count += 1
-                if arg_count == 2:
-                    fn_key = "INDEX"
-                elif arg_count == 3:
-                    fn_key = "OREPLACE"
-            fn_name = fn_key.lower() if fn_key else None
-            return target_col, fn_name, (fn_args or None)
-    return None, None, None
+            if isinstance(a, exp.Column):
+                continue
+            lits = _literal_values(a)
+            args.append(lits[0] if lits else _render_sql(a))
+        return _func_name_canon(name), args
+
+    Extract = getattr(exp, "Extract", None)
+    def next_inner_expr(func: exp.Expression) -> Optional[exp.Expression]:
+        # For Extract, descend into .expression
+        if Extract is not None and isinstance(func, Extract):
+            return getattr(func, "expression", None)
+        # Otherwise prefer first positional, then 'this'
+        if getattr(func, "expressions", None):
+            for e in func.expressions:
+                if isinstance(e, exp.Expression) and not isinstance(e, exp.Identifier):
+                    return e
+        maybe = getattr(func, "args", {}).get("this")
+        if isinstance(maybe, exp.Expression) and not isinstance(maybe, exp.Identifier):
+            return maybe
+        return None
+
+    while isinstance(current, (exp.Func, Extract if Extract is not None else tuple())):
+        fname, fargs = func_name_and_args_any(current)
+        stack.append({"fn": fname, "args": fargs})
+        next_expr: Optional[exp.Expression] = next_inner_expr(current)
+        if isinstance(next_expr, exp.Column):
+            target_col = next_expr
+            break
+        elif isinstance(next_expr, (exp.Func, Extract if Extract is not None else tuple())) or isinstance(next_expr, exp.Expression):
+            current = next_expr
+        else:
+            break
+
+    if target_col is not None:
+        top = stack[0] if stack else None
+        top_name = top.get("fn") if top else None
+        top_args = top.get("args") if top else None
+        return target_col, (top_name.lower() if top_name else None), (top_args or None), (stack or None)
+    return None, None, None, None
 
 
-def unwrap_value_and_fn(expr: exp.Expression) -> Tuple[List[Any], Optional[str], Optional[List[Any]]]:
-    """Extract literal value(s) and a function name (+ args) if expression is a function on literal(s).
+def unwrap_value_and_fn(expr: exp.Expression) -> Tuple[List[Any], Optional[str], Optional[List[Any]], Optional[List[Dict[str, Any]]]]:
+    """Extract literal value(s) and nested function stack on literal side.
 
-    Returns (values, fn_name_or_None, fn_args_or_None).
+    Returns (values, top_value_fn, top_value_fn_args, value_fn_stack).
     """
     # Direct literals or tuples
     vals = _literal_values(expr)
     if vals:
-        return vals, None, None
+        return vals, None, None, None
     # Function wrapping literal(s)
     if isinstance(expr, exp.Func):
-        key_name = getattr(expr, "key", None)
-        if key_name == "ANONYMOUS":
-            fn_key = _extract_func_name_sql(expr)
-        else:
-            fn_key = key_name or _id_to_str(getattr(expr, "this", None))
-        # Resolve arg nodes
-        arg_nodes: List[exp.Expression] = []
-        if getattr(expr, "expressions", None):
-            for e in expr.expressions:
-                if isinstance(e, exp.Expression) and not isinstance(e, exp.Identifier):
-                    arg_nodes.append(e)
-        maybe_arg = expr.args.get("this")
-        if isinstance(maybe_arg, exp.Expression) and not isinstance(maybe_arg, exp.Identifier):
-            arg_nodes.append(maybe_arg)
-        vals_acc: List[Any] = []
-        fn_args: List[Any] = []
-        for a in arg_nodes:
-            lv = _literal_values(a)
-            if lv:
-                vals_acc.extend(lv)
-                # Record arg literals as part of fn_args too
-                fn_args.append(lv[0])
-            else:
-                fn_args.append(_render_sql(a))
-        if vals_acc:
-            return vals_acc, (fn_key.lower() if fn_key else None), (fn_args or None)
-        return [], None, None
+        stack: List[Dict[str, Any]] = []
+        current: exp.Expression = expr
+        while isinstance(current, exp.Func):
+            key_name = getattr(current, "key", None)
+            name = key_name or _id_to_str(getattr(current, "this", None)) or ""
+            if not name or name.upper() == "ANONYMOUS":
+                cnt = 0
+                if getattr(current, "expressions", None):
+                    cnt += sum(1 for e in current.expressions if isinstance(e, exp.Expression) and not isinstance(e, exp.Identifier))
+                for v in current.args.values():
+                    if isinstance(v, exp.Expression) and not isinstance(v, exp.Identifier):
+                        cnt += 1
+                if cnt == 2:
+                    name = "INDEX"
+                elif cnt == 3:
+                    name = "OREPLACE"
+            # gather args and descend
+            arg_nodes: List[exp.Expression] = []
+            if getattr(current, "expressions", None):
+                for e in current.expressions:
+                    if isinstance(e, exp.Expression) and not isinstance(e, exp.Identifier):
+                        arg_nodes.append(e)
+            first_arg = current.args.get("this")
+            if isinstance(first_arg, exp.Expression) and not isinstance(first_arg, exp.Identifier):
+                arg_nodes.append(first_arg)
+            args: List[Any] = []
+            next_expr: Optional[exp.Expression] = None
+            for a in arg_nodes:
+                lv = _literal_values(a)
+                if lv:
+                    args.append(lv[0])
+                    if next_expr is None:
+                        next_expr = a
+                else:
+                    if next_expr is None:
+                        next_expr = a
+                    args.append(_render_sql(a))
+            stack.append({"fn": _func_name_canon(name), "args": args or []})
+            if next_expr is None:
+                break
+            current = next_expr
+        vals_acc = _literal_values(current)
+        return (vals_acc or []), (stack[0]["fn"].lower() if stack else None), (stack[0]["args"] if stack else None), (stack or None)
 
     # Not a literal or function on literals
-    return [], None, None
+    return [], None, None, None
 
 
 def _render_expr(

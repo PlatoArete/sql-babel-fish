@@ -143,3 +143,13 @@ Run examples by piping SQL into the MVP or using the CLI:
   ```bash
   echo "SELECT * FROM sales.order_items b WHERE INDEX(b.note, 'x') > 0 AND OREPLACE(b.code, '-', '') = 'ABC';" | python mvp_check.py
   ```
+
+- Nested wrappers (equality):
+  ```bash
+  echo "SELECT * FROM sales.order_items b WHERE UPPER(TRIM(b.status)) = LOWER(TRIM('X'));" | python mvp_check.py
+  ```
+
+- Nested wrappers in IN list:
+  ```bash
+  echo "SELECT * FROM sales.order_items b WHERE b.status IN (LOWER(TRIM('A')), 'b');" | python mvp_check.py
+  ```

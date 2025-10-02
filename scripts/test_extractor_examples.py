@@ -350,6 +350,33 @@ def run_tests():
     assert res20.get("_warnings", []) == [], f"pseudocode#20 unexpected warnings: {res20.get('_warnings')}"
     print("Test 20 ran and completed successfully.")
 
+    # 27) Nested wrappers equality: UPPER(TRIM(col)) = LOWER(TRIM('X'))
+    sql27 = "SELECT * FROM sales.order_items b WHERE UPPER(TRIM(b.status)) = LOWER(TRIM('X'));"
+    res27 = extract_teradata_dependencies(sql27)
+    v27 = res27.get("_values", {}).get("sales.order_items", {}).get("status", [])
+    eq27 = [c for c in v27 if c.get("op") == "="]
+    assert eq27, f"values#27 missing equality: {v27}"
+    c27 = eq27[0]
+    # Column-side stack
+    fn_stack = c27.get("fn_stack", [])
+    assert fn_stack and fn_stack[0].get("fn") == "UPPER" and (len(fn_stack) >= 2 and fn_stack[1].get("fn") == "TRIM"), f"values#27 missing col fn_stack: {fn_stack}"
+    # Literal-side stack
+    vfn_stack = c27.get("value_fn_stack", [])
+    assert vfn_stack and vfn_stack[0].get("fn") == "LOWER" and (len(vfn_stack) >= 2 and vfn_stack[1].get("fn") == "TRIM"), f"values#27 missing value fn_stack: {vfn_stack}"
+    print("Test 27 ran and completed successfully.")
+
+    # 28) Nested wrappers in IN list: b.status IN (LOWER(TRIM('A')), 'b')
+    sql28 = "SELECT * FROM sales.order_items b WHERE b.status IN (LOWER(TRIM('A')), 'b');"
+    res28 = extract_teradata_dependencies(sql28)
+    v28 = res28.get("_values", {}).get("sales.order_items", {}).get("status", [])
+    in28 = [c for c in v28 if c.get("op") == "in"]
+    assert in28, f"values#28 missing in: {v28}"
+    c28 = in28[0]
+    stacks = c28.get("value_fn_stack_list") or []
+    assert stacks and stacks[0] and stacks[0][0].get("fn") in ("LOWER","lower") and (len(stacks[0]) >= 2 and stacks[0][1].get("fn") in ("TRIM","trim")), f"values#28 missing nested value stacks: {stacks}"
+    assert len(stacks) >= 2 and (stacks[1] is None or stacks[1] == []), f"values#28 second element should have no stack: {stacks}"
+    print("Test 28 ran and completed successfully.")
+
     print("All example tests passed.")
 
 
