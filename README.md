@@ -20,12 +20,12 @@ Output Shape (JSON)
 - `_variables`: map of `catalog.schema.table -> [columns]`
   - `_values`: nested map of constant filters grouped by table and column. Each column maps to a list of condition objects:
     - Equality: `{ "op": "=", "value": 117 }`
-    - IN list: `{ "op": "in", "values": ["a", "b"], "value_fns": ["upper", null] }` (value_fns optional; per-value function markers)
+    - IN list: `{ "op": "in", "values": ["a", "b"], "value_fns": ["upper", null], "value_fn_args_list": [[...], null] }` (per-value function markers/args)
     - LIKE: `{ "op": "like", "value": "%abc%" }`
     - Ranges: `{ "op": ">"|">="|"<"|"<=", "value": 100 }`
     - BETWEEN: `{ "op": "between", "low": 100, "high": 200 }`
-    - Optional function wrapper when applied to the column: add `{ "fn": "upper" }` (e.g., from `UPPER(col) = 'X'`)
-    - Optional function wrapper when applied to the literal side: add `{ "value_fn": "upper" }` (e.g., from `UPPER('x') = col`)
+    - Optional function wrapper when applied to the column: add `{ "fn": "upper", "fn_args": [arg1, ...] }` (e.g., `SUBSTR(col,1,3) = 'X'`)
+    - Optional function wrapper when applied to the literal side: add `{ "value_fn": "upper", "value_fn_args": [args...] }` (e.g., `UPPER('x') = col`)
   - Records "*" when star expansion is used (see warnings)
 - `_temp_tables`: list of temp/volatile/global temporary tables
 - `_ctes`: list of CTE names

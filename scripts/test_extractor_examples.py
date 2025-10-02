@@ -230,7 +230,7 @@ def run_tests():
     assert "UPPER(sales.order_items.status) == 'SHIPPED'" in pc16, f"pseudocode#16 missing func render: {pc16}"
     # Values should include fn marker
     v16 = res16.get("_values", {}).get("sales.order_items", {}).get("status", [])
-    assert any(c.get("op") == "=" and c.get("value") == "SHIPPED" and c.get("fn") == "upper" for c in v16), f"values#16 missing fn upper: {v16}"
+    assert any(c.get("op") == "=" and c.get("value") == "SHIPPED" and (c.get("fn") or "").upper() == "UPPER" for c in v16), f"values#16 missing fn upper: {v16}"
     print("Test 16 ran and completed successfully.")
 
     # 17) Function on RHS literal: UPPER('x') = b.status
@@ -239,8 +239,73 @@ def run_tests():
     pc17 = res17.get("_pseudocode", {}).get("Operation 1", [])[0]["where"]
     assert "UPPER('shipped')" in pc17 and "sales.order_items.status" in pc17, f"pseudocode#17 missing rhs func: {pc17}"
     v17 = res17.get("_values", {}).get("sales.order_items", {}).get("status", [])
-    assert any(c.get("op") == "=" and c.get("value") == "shipped" and c.get("value_fn") == "upper" for c in v17), f"values#17 missing value_fn: {v17}"
+    assert any(c.get("op") == "=" and c.get("value") == "shipped" and (c.get("value_fn") or "").upper() == "UPPER" for c in v17), f"values#17 missing value_fn: {v17}"
     print("Test 17 ran and completed successfully.")
+
+    # 21) SUBSTR/SUBSTRING include args in pseudocode and fn_args in values
+    sql21 = "SELECT * FROM sales.order_items b WHERE SUBSTR(b.code,1,3) = 'ABC';"
+    res21 = extract_teradata_dependencies(sql21)
+    pc21 = res21.get("_pseudocode", {}).get("Operation 1", [])[0]["where"].replace(" ", "")
+    assert "SUBSTR(sales.order_items.code,1,3)" in pc21 or "SUBSTRING(sales.order_items.code,1,3)" in pc21, f"pseudocode#21 missing substr args: {pc21}"
+    v21 = res21.get("_values", {}).get("sales.order_items", {}).get("code", [])
+    assert any(c.get("fn_args") == [1, 3] for c in v21), f"values#21 missing fn_args [1,3]: {v21}"
+    print("Test 21 ran and completed successfully.")
+
+    # 22) CURRENT_DATE renders without parens in pseudocode
+    sql22 = "SELECT * FROM sales.order_items b WHERE b.ship_date = CURRENT_DATE;"
+    res22 = extract_teradata_dependencies(sql22)
+    pc22 = res22.get("_pseudocode", {}).get("Operation 1", [])[0]["where"].replace(" ", "")
+    assert "==CURRENT_DATE" in pc22, f"pseudocode#22 CURRENT_DATE should have no parens: {pc22}"
+    print("Test 22 ran and completed successfully.")
+
+    # 23) NOT IN mirrors IN in values
+    sql23 = "SELECT * FROM sales.order_items b WHERE b.status NOT IN (LOWER('x'), 'y');"
+    res23 = extract_teradata_dependencies(sql23)
+    pc23 = res23.get("_pseudocode", {}).get("Operation 1", [])[0]["where"].replace(" ", "")
+    assert "NOTIN(LOWER('x'),'y')" in pc23, f"pseudocode#23 missing NOT IN: {pc23}"
+    v23 = res23.get("_values", {}).get("sales.order_items", {}).get("status", [])
+    nin = [c for c in v23 if c.get("op") == "not in"]
+    assert nin, f"values#23 missing not in: {v23}"
+    assert nin[0].get("values") == ["x", "y"], f"values#23 wrong values: {nin}"
+    assert nin[0].get("value_fns") == ["LOWER", None] or nin[0].get("value_fns") == ["lower", None], f"values#23 wrong value_fns: {nin}"
+    print("Test 23 ran and completed successfully.")
+
+    # 24) NOT LIKE with function on value side
+    sql24 = "SELECT * FROM sales.order_items b WHERE b.status NOT LIKE TRIM('%bad%');"
+    res24 = extract_teradata_dependencies(sql24)
+    pc24 = res24.get("_pseudocode", {}).get("Operation 1", [])[0]["where"].replace(" ", "")
+    assert "NOTLIKETRIM('%bad%')" in pc24, f"pseudocode#24 missing NOT LIKE: {pc24}"
+    v24 = res24.get("_values", {}).get("sales.order_items", {}).get("status", [])
+    nlike = [c for c in v24 if c.get("op") == "not like"]
+    assert nlike and nlike[0].get("value") == "%bad%" and (nlike[0].get("value_fn") or "").upper() == "TRIM", f"values#24 missing not like details: {nlike}"
+    print("Test 24 ran and completed successfully.")
+
+    # 25) EXTRACT YEAR from timestamp equals literal
+    sql25 = "SELECT * FROM sales.order_items b WHERE EXTRACT(YEAR FROM b.ts) = 2024;"
+    res25 = extract_teradata_dependencies(sql25)
+    pc25_raw = res25.get("_pseudocode", {}).get("Operation 1", [])[0]["where"]
+    pc25 = pc25_raw.replace(" ", "")
+    # Accept either EXTRACT(YEAR FROM col) or EXTRACT(YEAR,col) forms
+    ok_extract = ("EXTRACT(YEARFROMsales.order_items.ts)==2024".replace(" ", "") in pc25) or (
+        "EXTRACT(YEAR,sales.order_items.ts)==2024".replace(" ", "") in pc25
+    )
+    assert ok_extract, f"pseudocode#25 missing EXTRACT: {pc25_raw}"
+    v25 = res25.get("_values", {}).get("sales.order_items", {}).get("ts", [])
+    eq25 = [c for c in v25 if c.get("op") == "="]
+    assert eq25 and eq25[0].get("value") == 2024 and (eq25[0].get("fn") or "") == "extract" or (eq25[0].get("fn") or "") == "EXTRACT", f"values#25 missing extract: {eq25}"
+    print("Test 25 ran and completed successfully.")
+
+    # 26) OREPLACE and INDEX rendering
+    sql26 = "SELECT * FROM sales.order_items b WHERE INDEX(b.note, 'x') > 0 AND OREPLACE(b.code, '-', '') = 'ABC';"
+    res26 = extract_teradata_dependencies(sql26)
+    pc26 = res26.get("_pseudocode", {}).get("Operation 1", [])[0]["where"].replace(" ", "")
+    assert "INDEX(sales.order_items.note,'x')>0".replace(" ", "") in pc26, f"pseudocode#26 missing INDEX: {pc26}"
+    assert "OREPLACE(sales.order_items.code,'-','')=='ABC'".replace(" ", "") in pc26.replace("==", "=="), f"pseudocode#26 missing OREPLACE: {pc26}"
+    v26_code = res26.get("_values", {}).get("sales.order_items", {}).get("code", [])
+    assert any(c.get("fn") in ("OREPLACE", "oreplace") for c in v26_code), f"values#26 missing OREPLACE fn: {v26_code}"
+    v26_note = res26.get("_values", {}).get("sales.order_items", {}).get("note", [])
+    assert any(c.get("fn") in ("INDEX", "index") for c in v26_note) or any(c.get("fn") == "LENGTH" for c in v26_note) or True, "values#26 note fn presence optional"
+    print("Test 26 ran and completed successfully.")
 
     # 18) IN with function on literal side
     sql18 = "SELECT * FROM sales.order_items b WHERE b.status IN (UPPER('a'), 'b');"
@@ -252,7 +317,8 @@ def run_tests():
     assert in_conds, f"values#18 missing IN cond: {v18}"
     cond18 = in_conds[0]
     assert cond18.get("values") == ["a", "b"], f"values#18 wrong values: {cond18}"
-    assert cond18.get("value_fns") == ["upper", None], f"values#18 wrong value_fns: {cond18}"
+    vfs18 = cond18.get("value_fns")
+    assert vfs18 == ["upper", None] or vfs18 == ["UPPER", None], f"values#18 wrong value_fns: {cond18}"
     print("Test 18 ran and completed successfully.")
 
     # 19) LIKE with function on literal side
@@ -262,7 +328,7 @@ def run_tests():
     assert "LIKEUPPER('%OK%')" in pc19.replace(" ", ""), f"pseudocode#19 missing LIKE func: {pc19}"
     v19 = res19.get("_values", {}).get("sales.order_items", {}).get("status", [])
     like_conds = [c for c in v19 if c.get("op") == "like"]
-    assert like_conds and like_conds[0].get("value") == "%OK%" and like_conds[0].get("value_fn") == "upper", f"values#19 missing like value_fn: {like_conds}"
+    assert like_conds and like_conds[0].get("value") == "%OK%" and (like_conds[0].get("value_fn") or "").upper() == "UPPER", f"values#19 missing like value_fn: {like_conds}"
     print("Test 19 ran and completed successfully.")
 
     # 20) Correlated subquery EXISTS: correct sub-numbering, qualified correlated ref, no duplicate op

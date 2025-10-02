@@ -123,3 +123,23 @@ Run examples by piping SQL into the MVP or using the CLI:
   ```bash
   echo "SELECT b.transaction_date FROM sales.order_items b WHERE b.transaction_date BETWEEN '2024-01-01' AND '2024-12-31';" | python mvp_check.py
   ```
+
+- NOT IN with function on values:
+  ```bash
+  echo "SELECT * FROM sales.order_items b WHERE b.status NOT IN (LOWER('x'), 'y');" | python mvp_check.py
+  ```
+
+- NOT LIKE with function on value:
+  ```bash
+  echo "SELECT * FROM sales.order_items b WHERE b.status NOT LIKE TRIM('%bad%');" | python mvp_check.py
+  ```
+
+- EXTRACT for date parts:
+  ```bash
+  echo "SELECT * FROM sales.order_items b WHERE EXTRACT(YEAR FROM b.ts) = 2024;" | python mvp_check.py
+  ```
+
+- OREPLACE and INDEX rendering:
+  ```bash
+  echo "SELECT * FROM sales.order_items b WHERE INDEX(b.note, 'x') > 0 AND OREPLACE(b.code, '-', '') = 'ABC';" | python mvp_check.py
+  ```
