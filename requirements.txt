@@ -1,0 +1,4 @@
+# Pin a known-stable sqlglot version for Teradata parsing/qualifying.
+# Adjust as needed if you upgrade sqlglot APIs.
+sqlglot==25.11.0
+
