@@ -926,7 +926,20 @@ def unwrap_col_and_fn(expr: exp.Expression) -> Tuple[Optional[exp.Column], Optio
             if arg_count == 2:
                 name = "INDEX"
             elif arg_count == 3:
-                name = "OREPLACE"
+                # Distinguish SUBSTR vs OREPLACE via numeric args
+                def is_num(n: exp.Expression) -> bool:
+                    vals = _literal_values(n)
+                    return bool(vals) and isinstance(vals[0], (int, float))
+                args_list: List[exp.Expression] = []
+                if getattr(func, "expressions", None):
+                    for e in func.expressions:
+                        if isinstance(e, exp.Expression) and not isinstance(e, exp.Identifier):
+                            args_list.append(e)
+                for v in getattr(func, "args", {}).values():
+                    if isinstance(v, exp.Expression) and not isinstance(v, exp.Identifier):
+                        args_list.append(v)
+                numeric_count = sum(1 for a in args_list if is_num(a))
+                name = "SUBSTR" if numeric_count >= 2 else "OREPLACE"
         # collect non-column args
         arg_nodes: List[exp.Expression] = []
         if getattr(func, "expressions", None):
