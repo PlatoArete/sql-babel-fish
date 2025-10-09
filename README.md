@@ -70,7 +70,8 @@ Run Example Tests
 - `python scripts/test_extractor_examples.py`
 
 Design/Docs
-- See `agents/AGENTS.md` for goals, scope, and AST traversal cautions (with link to the sqlglot AST primer).
+- Extractor internals (annotated): `docs/extract_teradata_dependencies.md`
+- Project goals, scope, cautions: `agents/AGENTS.md`
 
 Limitations
 - No validation of object existence or permissions.
