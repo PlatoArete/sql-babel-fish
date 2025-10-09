@@ -10,6 +10,34 @@ from typing import Dict, List, Set, Tuple, Optional, Any
 def _norm(s: str) -> str:
     return s.lower() if isinstance(s, str) else s
 
+def _extract_func_name_sql(node) -> str:
+    """Best-effort extraction of a function name from a sqlglot Func node.
+
+    Fallbacks when the node's `key`/`this` isn't populated:
+    - Render the node to SQL and regex-match an identifier immediately before '('
+    - Try unwrapping `this` or `key` if they exist as strings
+
+    Returns an upper-cased name or empty string if undetectable.
+    """
+    # Try rendering to SQL and regex the leading identifier before '('
+    rendered = ""
+    try:
+        rendered = node.sql(dialect="teradata")
+    except Exception:
+        try:
+            rendered = str(node)
+        except Exception:
+            rendered = ""
+    if rendered:
+        m = re.match(r"\s*([A-Za-z_][\w$]*)\s*\(", rendered)
+        if m:
+            return m.group(1).upper()
+    # Fallbacks: attempt to read attributes directly
+    name = _id_to_str(getattr(node, "this", None)) or getattr(node, "key", None)
+    if isinstance(name, str) and name:
+        return name.upper()
+    return ""
+
 try:
     import sqlglot
     from sqlglot import expressions as exp
@@ -1071,7 +1099,7 @@ def _render_expr(
         else:
             raw_name = key_name or _id_to_str(getattr(node, "this", None)) or _extract_func_name_sql(node)
         name = _func_name_canon(raw_name)
-        # Heuristic fallback for anonymous/unknown names (e.g., INDEX/OREPLACE)
+        # Heuristic fallback for anonymous/unknown names (e.g., INDEX/OREPLACE/SUBSTR)
         if not name or name.upper() == "ANONYMOUS":
             arg_count = 0
             if getattr(node, "expressions", None):
@@ -1082,7 +1110,22 @@ def _render_expr(
             if arg_count == 2:
                 name = "INDEX"
             elif arg_count == 3:
-                name = "OREPLACE"
+                # Match logic used in unwrap_col_and_fn: if at least two
+                # numeric literal args are present, it's likely SUBSTR;
+                # otherwise assume OREPLACE.
+                def _is_num(n: exp.Expression) -> bool:
+                    vals = _literal_values(n)
+                    return bool(vals) and isinstance(vals[0], (int, float))
+                arg_nodes_check = []
+                if getattr(node, "expressions", None):
+                    for e in node.expressions:
+                        if isinstance(e, exp.Expression) and not isinstance(e, exp.Identifier):
+                            arg_nodes_check.append(e)
+                for v in node.args.values():
+                    if isinstance(v, exp.Expression) and not isinstance(v, exp.Identifier):
+                        arg_nodes_check.append(v)
+                numeric_count = sum(1 for a in arg_nodes_check if _is_num(a))
+                name = "SUBSTR" if numeric_count >= 2 else "OREPLACE"
         # No-paren for CURRENT_* literals
         if name in ("CURRENT_DATE", "CURRENT_TIMESTAMP", "CURRENT_TIME"):
             return name
