@@ -4,7 +4,12 @@ import json
 import re
 import sys
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple, Optional, Any
+from typing import Dict, List, Set, Tuple, Optional, Any, Union, Literal, TypedDict
+
+
+class ExtractionErrorResult(TypedDict):
+    error: str
+    type: Literal["parse", "runtime"]
 
 
 def _norm(s: str) -> str:
@@ -1427,164 +1432,176 @@ def _collect_function_calls(tree: exp.Expression) -> List[Dict[str, object]]:
     return calls
 
 
-def extract_teradata_dependencies(sql: str) -> Dict[str, object]:
+def _build_soft_error(message: str, error_type: Literal["parse", "runtime"]) -> ExtractionErrorResult:
+    return {"error": message, "type": error_type}
+
+
+def extract_teradata_dependencies(
+    sql: str, *, soft_errors: bool = False
+) -> Union[Dict[str, object], ExtractionErrorResult]:
     try:
         statements = sqlglot.parse(sql, read="teradata")
     except Exception as e:
-        # Fail fast
+        if soft_errors:
+            return _build_soft_error(f"Parse failed: {e}", "parse")
         raise RuntimeError(f"Parse error: {e}")
 
-    tables: Set[str] = set()
-    temp_tables: Set[str] = set()
-    ctes: Set[str] = set()
-    created_objects: Set[str] = set()
-    write_targets: Set[str] = set()
-    functions: List[Dict[str, object]] = []
-    variables: Dict[str, Set[str]] = defaultdict(set)
-    values: Dict[str, Dict[str, Set[object]]] = {}
-    warnings: List[str] = []
+    try:
+        tables: Set[str] = set()
+        temp_tables: Set[str] = set()
+        ctes: Set[str] = set()
+        created_objects: Set[str] = set()
+        write_targets: Set[str] = set()
+        functions: List[Dict[str, object]] = []
+        variables: Dict[str, Set[str]] = defaultdict(set)
+        values: Dict[str, Dict[str, Set[object]]] = {}
+        warnings: List[str] = []
 
-    pseudocode_map: Dict[str, List[Dict[str, str]]] = {}
+        pseudocode_map: Dict[str, List[Dict[str, str]]] = {}
 
-    def _is_direct_child_select(child_sel: exp.Select, root_sel: exp.Select) -> bool:
-        if child_sel is root_sel:
-            return False
-        p = getattr(child_sel, "parent", None)
-        while p is not None and p is not root_sel:
-            # If we encounter another Select between child and root, it's nested deeper; skip
-            if isinstance(p, exp.Select):
+        def _is_direct_child_select(child_sel: exp.Select, root_sel: exp.Select) -> bool:
+            if child_sel is root_sel:
                 return False
-            p = getattr(p, "parent", None)
-        return p is root_sel
+            p = getattr(child_sel, "parent", None)
+            while p is not None and p is not root_sel:
+                # If we encounter another Select between child and root, it's nested deeper; skip
+                if isinstance(p, exp.Select):
+                    return False
+                p = getattr(p, "parent", None)
+            return p is root_sel
 
-    select_label_map: Dict[exp.Select, str] = {}
+        select_label_map: Dict[exp.Select, str] = {}
 
-    def _direct_child_selects(sel: exp.Select) -> List[exp.Select]:
-        children: List[exp.Select] = []
-        for child in sel.find_all(exp.Select):
-            if _is_direct_child_select(child, sel):
-                children.append(child)
-        return children
+        def _direct_child_selects(sel: exp.Select) -> List[exp.Select]:
+            children: List[exp.Select] = []
+            for child in sel.find_all(exp.Select):
+                if _is_direct_child_select(child, sel):
+                    children.append(child)
+            return children
 
-    def _assign_labels(sel: exp.Select, label: str):
-        select_label_map[sel] = label
-        idx = 1
-        for child in _direct_child_selects(sel):
-            _assign_labels(child, f"{label}.{idx}")
-            idx += 1
+        def _assign_labels(sel: exp.Select, label: str):
+            select_label_map[sel] = label
+            idx = 1
+            for child in _direct_child_selects(sel):
+                _assign_labels(child, f"{label}.{idx}")
+                idx += 1
 
-    def _render_select_and_children(sel: exp.Select, label: str):
-        alias_map_local, alias_cols, alias_single_base = _build_alias_map_for_select(sel)
-        outer_alias_map = _collect_outer_alias_map(sel)
-        alias_map = dict(outer_alias_map)
-        alias_map.update(alias_map_local)
-        where_node = sel.args.get("where")
-        where_pc = _render_condition(where_node.this, alias_map, alias_cols, alias_single_base, select_label_map) if where_node is not None else ""
-        having_node = sel.args.get("having")
-        having_pc = _render_condition(having_node.this, alias_map, alias_cols, alias_single_base, select_label_map) if having_node is not None else ""
-        join_pc = _collect_join_pseudocode_for_select(sel, alias_map, alias_cols, alias_single_base) or ""
-        op_key = f"Operation {label}"
-        pseudocode_map[op_key] = [{
-            "join": join_pc,
-            "where": where_pc,
-            "having": having_pc,
-        }]
-        # Then render children in order
-        idx = 1
-        for child in _direct_child_selects(sel):
-            _render_select_and_children(child, f"{label}.{idx}")
-            idx += 1
-
-    top_index = 1
-    for stmt in statements:
-        # Use sqlglot qualifier to improve scoping where available
-        qualified_stmt = stmt
-        if 'qualify_expr' in globals() and qualify_expr is not None:
-            try:
-                qualified_stmt = qualify_expr(stmt, dialect="teradata")
-            except Exception:
-                qualified_stmt = stmt
-        # CTEs for this statement
-        stmt_ctes = _collect_cte_names(qualified_stmt)
-        ctes.update(stmt_ctes)
-
-        # Created objects and temps
-        created, temps = _collect_created_objects_and_temps(qualified_stmt)
-        created_objects.update(created)
-        temp_tables.update(temps)
-        # DML write targets
-        write_targets.update(_collect_write_targets(qualified_stmt))
-
-        # Base tables referenced (exclude CTE names and created targets)
-        for t in qualified_stmt.find_all(exp.Table):
-            qname = _qualify_table_name(t)
-            if not qname:
-                continue
-            base = _table_base_name(t)
-            base_name = base or qname
-            if base_name in ctes:
-                continue
-            if qname in created_objects:
-                continue
-            if qname in write_targets:
-                continue
-            tables.add(qname)
-
-        # Variables: per SELECT scope
-        for sel in qualified_stmt.find_all(exp.Select):
+        def _render_select_and_children(sel: exp.Select, label: str):
             alias_map_local, alias_cols, alias_single_base = _build_alias_map_for_select(sel)
             outer_alias_map = _collect_outer_alias_map(sel)
             alias_map = dict(outer_alias_map)
             alias_map.update(alias_map_local)
-            _collect_variables_for_select(sel, alias_map, alias_cols, alias_single_base, variables, warnings)
-            _collect_values_for_select(sel, alias_map, alias_cols, alias_single_base, values)
-            # Only label the top-level SELECT (the statement root) with a base index
-            if sel is qualified_stmt:
-                _assign_labels(sel, str(top_index))
-                _render_select_and_children(sel, str(top_index))
-                top_index += 1
+            where_node = sel.args.get("where")
+            where_pc = _render_condition(where_node.this, alias_map, alias_cols, alias_single_base, select_label_map) if where_node is not None else ""
+            having_node = sel.args.get("having")
+            having_pc = _render_condition(having_node.this, alias_map, alias_cols, alias_single_base, select_label_map) if having_node is not None else ""
+            join_pc = _collect_join_pseudocode_for_select(sel, alias_map, alias_cols, alias_single_base) or ""
+            op_key = f"Operation {label}"
+            pseudocode_map[op_key] = [{
+                "join": join_pc,
+                "where": where_pc,
+                "having": having_pc,
+            }]
+            # Then render children in order
+            idx = 1
+            for child in _direct_child_selects(sel):
+                _render_select_and_children(child, f"{label}.{idx}")
+                idx += 1
 
-        # Functions
-        functions.extend(_collect_function_calls(qualified_stmt))
+        top_index = 1
+        for stmt in statements:
+            # Use sqlglot qualifier to improve scoping where available
+            qualified_stmt = stmt
+            if 'qualify_expr' in globals() and qualify_expr is not None:
+                try:
+                    qualified_stmt = qualify_expr(stmt, dialect="teradata")
+                except Exception:
+                    qualified_stmt = stmt
+            # CTEs for this statement
+            stmt_ctes = _collect_cte_names(qualified_stmt)
+            ctes.update(stmt_ctes)
 
-    # Deduplicate functions by name/type
-    seen_funcs = set()
-    dedup_funcs = []
-    for f in functions:
-        key = (f.get("name", ""), f.get("type", ""))
-        if key in seen_funcs:
-            continue
-        seen_funcs.add(key)
-        dedup_funcs.append(f)
+            # Created objects and temps
+            created, temps = _collect_created_objects_and_temps(qualified_stmt)
+            created_objects.update(created)
+            temp_tables.update(temps)
+            # DML write targets
+            write_targets.update(_collect_write_targets(qualified_stmt))
 
-    # Convert variables sets to sorted lists
-    variables_out = {k: sorted(list(v)) for k, v in variables.items()}
-    # values already structured; sort condition lists for stability
-    values_out: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-    if 'values' in locals():
-        for t, cols in values.items():
-            values_out[t] = sorted(
-                {c: sorted(v, key=lambda d: json.dumps(d, sort_keys=True, ensure_ascii=False)) for c, v in cols.items()}.items(),
-                key=lambda kv: kv[0],
-            )
-        # Convert back from list of tuples to dict
-        values_out = {t: dict(cols) for t, cols in values_out.items()}
+            # Base tables referenced (exclude CTE names and created targets)
+            for t in qualified_stmt.find_all(exp.Table):
+                qname = _qualify_table_name(t)
+                if not qname:
+                    continue
+                base = _table_base_name(t)
+                base_name = base or qname
+                if base_name in ctes:
+                    continue
+                if qname in created_objects:
+                    continue
+                if qname in write_targets:
+                    continue
+                tables.add(qname)
 
-    result = {
-        "_tables": sorted(list(tables)),
-        "_variables": variables_out,
-        "_values": values_out,
-        "_temp_tables": sorted(list(temp_tables)),
-        "_ctes": sorted(list(ctes)),
-        "_functions": dedup_funcs,
-        "_created_objects": sorted(list(created_objects)),
-        "_write_targets": sorted(list(write_targets)),
-        "_pseudocode": pseudocode_map,
-        "_warnings": warnings,
-        "_meta": {"statements": len(statements), "dialect": "teradata"},
-    }
+            # Variables: per SELECT scope
+            for sel in qualified_stmt.find_all(exp.Select):
+                alias_map_local, alias_cols, alias_single_base = _build_alias_map_for_select(sel)
+                outer_alias_map = _collect_outer_alias_map(sel)
+                alias_map = dict(outer_alias_map)
+                alias_map.update(alias_map_local)
+                _collect_variables_for_select(sel, alias_map, alias_cols, alias_single_base, variables, warnings)
+                _collect_values_for_select(sel, alias_map, alias_cols, alias_single_base, values)
+                # Only label the top-level SELECT (the statement root) with a base index
+                if sel is qualified_stmt:
+                    _assign_labels(sel, str(top_index))
+                    _render_select_and_children(sel, str(top_index))
+                    top_index += 1
 
-    return result
+            # Functions
+            functions.extend(_collect_function_calls(qualified_stmt))
+
+        # Deduplicate functions by name/type
+        seen_funcs = set()
+        dedup_funcs = []
+        for f in functions:
+            key = (f.get("name", ""), f.get("type", ""))
+            if key in seen_funcs:
+                continue
+            seen_funcs.add(key)
+            dedup_funcs.append(f)
+
+        # Convert variables sets to sorted lists
+        variables_out = {k: sorted(list(v)) for k, v in variables.items()}
+        # values already structured; sort condition lists for stability
+        values_out: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        if 'values' in locals():
+            for t, cols in values.items():
+                values_out[t] = sorted(
+                    {c: sorted(v, key=lambda d: json.dumps(d, sort_keys=True, ensure_ascii=False)) for c, v in cols.items()}.items(),
+                    key=lambda kv: kv[0],
+                )
+            # Convert back from list of tuples to dict
+            values_out = {t: dict(cols) for t, cols in values_out.items()}
+
+        result = {
+            "_tables": sorted(list(tables)),
+            "_variables": variables_out,
+            "_values": values_out,
+            "_temp_tables": sorted(list(temp_tables)),
+            "_ctes": sorted(list(ctes)),
+            "_functions": dedup_funcs,
+            "_created_objects": sorted(list(created_objects)),
+            "_write_targets": sorted(list(write_targets)),
+            "_pseudocode": pseudocode_map,
+            "_warnings": warnings,
+            "_meta": {"statements": len(statements), "dialect": "teradata"},
+        }
+
+        return result
+    except Exception as e:
+        if soft_errors:
+            return _build_soft_error(f"Runtime error: {e}", "runtime")
+        raise
 
 
 def main(argv: List[str]) -> int:
@@ -1599,6 +1616,11 @@ def main(argv: List[str]) -> int:
     parser.add_argument(
         "--pretty", action="store_true", help="Pretty-print JSON output."
     )
+    parser.add_argument(
+        "--soft-errors",
+        action="store_true",
+        help="Return a JSON error payload instead of exiting on parse/runtime errors.",
+    )
     args = parser.parse_args(argv)
 
     if args.path:
@@ -1612,10 +1634,21 @@ def main(argv: List[str]) -> int:
         sql = sys.stdin.read()
 
     try:
-        result = extract_teradata_dependencies(sql)
+        result = extract_teradata_dependencies(sql, soft_errors=args.soft_errors)
     except Exception as e:
         print(str(e), file=sys.stderr)
         return 1
+    if (
+        args.soft_errors
+        and isinstance(result, dict)
+        and "error" in result
+        and "type" in result
+    ):
+        if args.pretty:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            print(json.dumps(result, separators=(",", ":"), ensure_ascii=False))
+        return 0
 
     if args.pretty:
         print(json.dumps(result, indent=2, ensure_ascii=False))

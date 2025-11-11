@@ -15,6 +15,7 @@ source listing at the end for easy reference.
 
 - CLI from a file: `python scripts/extract_teradata_dependencies.py path/to/query.sql --pretty`
 - CLI from stdin: `cat query.sql | python scripts/extract_teradata_dependencies.py --pretty`
+- Add `--soft-errors` to either CLI invocation to receive a JSON payload describing parse/runtime failures instead of an immediate exit.
 - MVP interactive: `python mvp_check.py` then paste SQL (EOF to finish)
 
 ## High-Level Flow
@@ -37,6 +38,10 @@ source listing at the end for easy reference.
 - Pseudocode rendering (`_render_condition`) qualifies columns and preserves function wrappers.
 - Constant filter extraction records both column-side function stacks and literal-side wrappers,
   providing rich context for downstream systems.
+- Optional soft-error mode returns a structured payload (`{"error": "...", "type": "parse"|"runtime"}`) when
+  `extract_teradata_dependencies(..., soft_errors=True)` is used (or when CLI/MVP commands are run
+  with `--soft-errors`). In this mode the CLI exits with status 0 even when an error payload is printed,
+  making it easier to integrate into pipelines that prefer JSON results over exceptions.
 
 ---
 
@@ -1747,4 +1752,3 @@ if __name__ == "__main__":
 ```
 
 </details>
-

@@ -16,6 +16,7 @@ Quick Start
 - CLI (file or stdin):
   - File: `python scripts/extract_teradata_dependencies.py examples/sample_teradata.sql --pretty`
   - Stdin: `cat query.sql | python scripts/extract_teradata_dependencies.py --pretty`
+  - Add `--soft-errors` to return a JSON error payload (type + message) instead of exiting on parse/runtime errors.
 
 Output Shape (JSON)
 - `_tables`: list of qualified base tables (excludes created targets and CTE names)
@@ -62,9 +63,10 @@ Examples
 
 Notes
 - Dialect: Teradata (`read="teradata"`).
-- Fail‑fast on parse errors (no partial output).
+- Fail-fast on parse errors (no partial output).
 - Derived tables and CTEs are handled so that columns resolve to their base tables when possible.
 - Function detection is conservative (requires name(...)) to avoid misclassifying columns.
+- Soft-error mode: pass `soft_errors=True` to `extract_teradata_dependencies(...)` (or `--soft-errors` to the CLI/MVP) to receive `{ "error": "...", "type": "parse"|"runtime" }` envelopes instead of exceptions. The CLI exits 0 in this mode even when an error payload is returned.
 
 Run Example Tests
 - `python scripts/test_extractor_examples.py`

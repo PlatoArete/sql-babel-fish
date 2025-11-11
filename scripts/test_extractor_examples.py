@@ -2,14 +2,17 @@
 import json
 import os
 import sys
+from unittest import mock
 
 # Support running as `python scripts/test_extractor_examples.py` or `python -m scripts.test_extractor_examples`
 try:
     from scripts.extract_teradata_dependencies import extract_teradata_dependencies  # type: ignore
+    import scripts.extract_teradata_dependencies as extractor_module  # type: ignore
 except ModuleNotFoundError:
     try:
         # If executed from within the scripts/ directory on sys.path
         from extract_teradata_dependencies import extract_teradata_dependencies  # type: ignore
+        import extract_teradata_dependencies as extractor_module  # type: ignore
     except ModuleNotFoundError:
         # Add repo root to sys.path and retry
         here = os.path.dirname(__file__)
@@ -17,6 +20,7 @@ except ModuleNotFoundError:
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
         from scripts.extract_teradata_dependencies import extract_teradata_dependencies  # type: ignore
+        import scripts.extract_teradata_dependencies as extractor_module  # type: ignore
 
 
 def assert_equal(actual, expected, msg_prefix=""):
@@ -376,6 +380,23 @@ def run_tests():
     assert stacks and stacks[0] and stacks[0][0].get("fn") in ("LOWER","lower") and (len(stacks[0]) >= 2 and stacks[0][1].get("fn") in ("TRIM","trim")), f"values#28 missing nested value stacks: {stacks}"
     assert len(stacks) >= 2 and (stacks[1] is None or stacks[1] == []), f"values#28 second element should have no stack: {stacks}"
     print("Test 28 ran and completed successfully.")
+
+    # 29) Soft parse error returns structured payload
+    bad_sql = "SELCT * FROM missing_table;"
+    err_res = extract_teradata_dependencies(bad_sql, soft_errors=True)
+    assert isinstance(err_res, dict) and err_res.get("type") == "parse", f"soft parse error payload mismatch: {err_res}"
+    assert "Parse failed" in err_res.get("error", ""), f"soft parse error message missing details: {err_res}"
+    print("Test 29 ran and completed successfully.")
+
+    # 30) Soft runtime error returns structured payload
+    runtime_sql = "SELECT 1;"
+    with mock.patch.object(
+        extractor_module, "_collect_variables_for_select", side_effect=RuntimeError("boom")
+    ):
+        err_runtime = extract_teradata_dependencies(runtime_sql, soft_errors=True)
+    assert err_runtime.get("type") == "runtime", f"soft runtime error payload mismatch: {err_runtime}"
+    assert "Runtime error" in err_runtime.get("error", ""), f"soft runtime error message missing details: {err_runtime}"
+    print("Test 30 ran and completed successfully.")
 
     print("All example tests passed.")
 
